@@ -343,8 +343,10 @@ class TaskService(CommonService):
                         ((prog == -1) | (prog > cls.model.progress))))
                     ).execute()
 
-        process_duration = (datetime.now() - task.begin_at).total_seconds()
-        cls.model.update(process_duration=process_duration).where(cls.model.id == id).execute()
+        begin_at = task.begin_at
+        if begin_at is not None:
+            process_duration = (datetime.now() - begin_at).total_seconds()
+            cls.model.update(process_duration=process_duration).where(cls.model.id == id).execute()
 
     @classmethod
     @DB.connection_context()
@@ -388,14 +390,13 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
 
     if doc["type"] == FileType.PDF.value:
         file_bin = settings.STORAGE_IMPL.get(bucket, name)
-        do_layout = doc["parser_config"].get("layout_recognize", "DeepDOC")
         pages = PdfParser.total_page_number(doc["name"], file_bin)
         if pages is None:
             pages = 0
         page_size = doc["parser_config"].get("task_page_size") or 12
         if doc["parser_id"] == "paper":
             page_size = doc["parser_config"].get("task_page_size") or 22
-        if doc["parser_id"] in ["one", "knowledge_graph"] or do_layout != "DeepDOC" or doc["parser_config"].get("toc_extraction", False):
+        if doc["parser_id"] in ["one", "knowledge_graph"] or doc["parser_config"].get("toc_extraction", False):
             page_size = MAXIMUM_TASK_PAGE_NUMBER
         page_ranges = doc["parser_config"].get("pages") or [(1, MAXIMUM_PAGE_NUMBER)]
         for s, e in page_ranges:
@@ -418,6 +419,9 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
             parse_task_array.append(task)
     else:
         parse_task_array.append(new_task())
+
+    # Determine suffix based on parser_id (consistent with SAAS version line 444)
+    suffix = "common" if doc["parser_id"] != "resume" else "resume"
 
     chunking_config = DocumentService.get_chunking_config(doc["id"])
     for task in parse_task_array:
@@ -456,7 +460,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     unfinished_task_array = [task for task in parse_task_array if task["progress"] < 1.0]
     for unfinished_task in unfinished_task_array:
         assert REDIS_CONN.queue_product(
-            settings.get_svr_queue_name(priority), message=unfinished_task
+            settings.get_svr_queue_name(priority, suffix), message=unfinished_task
         ), "Can't access Redis. Please check the Redis' status."
 
 
@@ -547,7 +551,7 @@ def queue_dataflow(tenant_id:str, flow_id:str, task_id:str, doc_id:str=CANVAS_DE
     task["file"] = file
 
     if not REDIS_CONN.queue_product(
-            settings.get_svr_queue_name(priority), message=task
+            settings.get_svr_queue_name(priority, "common"), message=task
     ):
         return False, "Can't access Redis. Please check the Redis' status."
 
